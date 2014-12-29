@@ -38,11 +38,19 @@ int fs_stderr_fd;
 #define FD_OUT 0
 #define FD_IN 1
 
+char file[1024];
+void open_infile() {
+  ERR_FATAL(open(file, O_RDONLY | O_NONBLOCK));
+  fs_stdin_fd = res;
+}
+
 void handle(struct epoll_event *e) {
   const size_t kBufSize = 1024;
   static char buf[kBufSize];
   if (e->events & EPOLLHUP && e->data.fd == fs_stdin_fd) {
-    return; // TODO: Should care about EPOLLHUP more generally...
+    ERR_FATAL(close(fs_stdin_fd));
+    open_infile();
+    return;
   }
   if (!(e->events & EPOLLIN)) {
     printf("unexpected event=%d on fd=%d\n", e->events, e->data.fd);
@@ -84,15 +92,13 @@ void register_epoll(int epfd, int fd, int events) {
 
 void bridge(const char *dir) {
   // Setup fifo and files
-  char file[1024];
   snprintf(file, sizeof(file), "%s/in", dir);
   res = unlink(file);
   if (res != 0 && !(res == -1 && errno == ENOENT)) {
     ERR_FATAL(res);
   }
   ERR_FATAL(mkfifo(file, S_IRWXU));
-  ERR_FATAL(open(file, O_RDONLY | O_NONBLOCK));
-  fs_stdin_fd = res;
+  open_infile();
 
   snprintf(file, sizeof(file), "%s/out", dir);
   ERR_FATAL(open(file, O_CREAT | O_WRONLY | O_TRUNC, S_IRWXU));
