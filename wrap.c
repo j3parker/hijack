@@ -2,6 +2,7 @@
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/epoll.h>
 #include <unistd.h>
 #include <sys/types.h>
@@ -28,31 +29,44 @@ int res;
     exit(-1);                                                                  \
   }
 
+char* in_path;
+int fs_stdin_fd;
+
+char* out_path;
+int fs_stdout_fd;
+
+char* err_path;
+int fs_stderr_fd;
+
 int stdin_pipe[2];
 int stdout_pipe[2];
 int stderr_pipe[2];
-int fs_stdin_fd;
-int fs_stdout_fd;
-int fs_stderr_fd;
+
+int epfd;
 
 #define FD_OUT 0
 #define FD_IN 1
 
-char file[1024];
+void register_epoll(int fd, int events) {
+  struct epoll_event e;
+  e.data.fd = fd;
+  e.events = events;
+  ERR_FATAL(epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &e));
+}
+
 void open_infile() {
-  ERR_FATAL(open(file, O_RDONLY | O_NONBLOCK));
+  ERR_FATAL(open(in_path, O_RDONLY | O_NONBLOCK));
   fs_stdin_fd = res;
+  register_epoll(fs_stdin_fd, EPOLLIN);
 }
 
 void handle(struct epoll_event *e) {
   const size_t kBufSize = 1024;
   static char buf[kBufSize];
-  if (e->events & EPOLLHUP && e->data.fd == fs_stdin_fd) {
-    ERR_FATAL(close(fs_stdin_fd));
-    open_infile();
-    return;
-  }
-  if (!(e->events & EPOLLIN)) {
+
+  int fs_stdin_hup = e->events & EPOLLHUP && e->data.fd == fs_stdin_fd;
+
+  if (!(e->events & EPOLLIN) && !fs_stdin_hup) {
     printf("unexpected event=%d on fd=%d\n", e->events, e->data.fd);
     exit(-1);
   }
@@ -81,31 +95,32 @@ void handle(struct epoll_event *e) {
     ERR_FATAL(write(fsfd, buf, count));
     assert(count == res);
   }
-}
 
-void register_epoll(int epfd, int fd, int events) {
-  struct epoll_event e;
-  e.data.fd = fd;
-  e.events = events;
-  ERR_FATAL(epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &e));
+  if (fs_stdin_hup) {
+    ERR_FATAL(close(fs_stdin_fd));
+    open_infile();
+  }
 }
 
 void bridge(const char *dir) {
   // Setup fifo and files
-  snprintf(file, sizeof(file), "%s/in", dir);
-  res = unlink(file);
+  int dir_len = strlen(dir);
+  in_path = malloc(dir_len + 3);
+  sprintf(in_path, "%s/in", dir);
+  res = unlink(in_path);
   if (res != 0 && !(res == -1 && errno == ENOENT)) {
     ERR_FATAL(res);
   }
-  ERR_FATAL(mkfifo(file, S_IRWXU));
-  open_infile();
+  ERR_FATAL(mkfifo(in_path, S_IRWXU));
 
-  snprintf(file, sizeof(file), "%s/out", dir);
-  ERR_FATAL(open(file, O_CREAT | O_WRONLY | O_TRUNC, S_IRWXU));
+  out_path = malloc(dir_len + 4);
+  sprintf(out_path, "%s/out", dir);
+  ERR_FATAL(open(out_path, O_CREAT | O_WRONLY | O_TRUNC, S_IRWXU));
   fs_stdout_fd = res;
 
-  snprintf(file, sizeof(file), "%s/err", dir);
-  ERR_FATAL(open(file, O_CREAT | O_WRONLY | O_TRUNC, S_IRWXU));
+  err_path = malloc(dir_len + 4);
+  sprintf(err_path, "%s/err", dir);
+  ERR_FATAL(open(err_path, O_CREAT | O_WRONLY | O_TRUNC, S_IRWXU));
   fs_stderr_fd = res;
 
   // Setup epoll
@@ -114,16 +129,16 @@ void bridge(const char *dir) {
   assert(events);
 
   ERR_FATAL(epoll_create(4));
-  int epfd = res;
+  epfd = res;
 
   ERR_FATAL(close(stdin_pipe[FD_OUT]));
   ERR_FATAL(close(stdout_pipe[FD_IN]));
   ERR_FATAL(close(stderr_pipe[FD_IN]));
 
-  register_epoll(epfd, stdout_pipe[FD_OUT], EPOLLIN);
-  register_epoll(epfd, stderr_pipe[FD_OUT], EPOLLIN);
-  register_epoll(epfd, STDIN_FILENO, EPOLLIN);
-  register_epoll(epfd, fs_stdin_fd, EPOLLIN);
+  register_epoll(stdout_pipe[FD_OUT], EPOLLIN);
+  register_epoll(stderr_pipe[FD_OUT], EPOLLIN);
+  register_epoll(STDIN_FILENO, EPOLLIN);
+  open_infile();
   // TODO:  EPOLLOUT | EPOLLET on outputs? buffers?
 
   while (1) {

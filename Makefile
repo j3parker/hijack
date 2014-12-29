@@ -1,4 +1,4 @@
 .PHONY: all
 
 all:
-	clang wrap.c -o wrap
+	clang -g -O3 wrap.c -o wrap
